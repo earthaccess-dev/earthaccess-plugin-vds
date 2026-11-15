@@ -3,10 +3,10 @@ revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
     "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version < '3.14' and sys_platform == 'emscripten'",
@@ -937,7 +937,7 @@ wheels = [
 [[package]]
 name = "earthaccess"
 version = "1.0.0a2"
-source = { git = "https://github.com/earthaccess-dev/earthaccess.git?rev=plugins#d25a0e6470f019dc7424e1ce8f78b2eb60d4972e" }
+source = { git = "https://github.com/earthaccess-dev/earthaccess.git?rev=plugins#1afe566cf57a0fc1e60492c25a32bcfd9a7d6645" }
 dependencies = [
     { name = "earthaccess-plugin-spec" },
     { name = "fsspec" },
