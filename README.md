@@ -1,5 +1,11 @@
 # earthaccess-plugin-vds
 
+> **Plugin preview.** This package is part of the v2.0.0 plugin preview and only
+> works with the `plugins` branch of earthaccess
+> ([`earthaccess-dev/earthaccess@plugins`](https://github.com/earthaccess-dev/earthaccess/tree/plugins)).
+> It is **not on PyPI yet** — see
+> [Installing and testing the drafts](https://github.com/earthaccess-dev/earthaccess-plugin-spec/blob/main/docs/install.md).
+
 Virtual datasets for earthaccess: virtualize NASA granules into
 [icechunk](https://icechunk.io) (default) or kerchunk-parquet stores, create
 new stores, and append to existing ones.
@@ -8,10 +14,20 @@ Built on [`earthaccess-plugin-spec`](https://github.com/earthaccess-dev/earthacc
 
 ## Install
 
+This package is **not on PyPI yet**. It is part of the v2.0.0 plugin preview and
+must be installed together with the `plugins` branch of earthaccess. The full
+steps (credentials, notebook deps, sanity check) are in
+[Installing and testing the drafts](https://github.com/earthaccess-dev/earthaccess-plugin-spec/blob/main/docs/install.md).
+
 ```bash
-pip install "earthaccess-plugin-vds"          # icechunk only
-pip install "earthaccess-plugin-vds[kerchunk]"    # kerchunk-parquet support
-pip install "earthaccess-plugin-vds[distributed]" # Dask client + JupyterLab dashboard
+git clone git@github.com:earthaccess-dev/earthaccess.git
+cd earthaccess
+git checkout plugins
+
+uv venv
+uv pip install -e ".[all]"
+# add [kerchunk] and/or [distributed] if you need those extras
+uv pip install "earthaccess-plugin-vds[kerchunk] @ git+https://github.com/earthaccess-dev/earthaccess-plugin-vds.git"
 ```
 
 ## Usage
@@ -96,6 +112,8 @@ same request also works on a Dask cluster whose workers carry the secrets.
 | no store, `load=True` | `xarray` | concrete lazily-loaded `xarray.Dataset` |
 
 ## Development
+
+Requires Python 3.12+ (icechunk, virtualizarr and earthaccess all do).
 
 ```bash
 pip install -e ".[test,kerchunk]"
