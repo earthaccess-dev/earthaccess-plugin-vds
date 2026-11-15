@@ -59,14 +59,14 @@ class RegistryConfig:
                     self.credentials_endpoint,
                     auth=token,
                 )
-            store = S3Store(
+            s3_store = S3Store(
                 bucket=self.host,
                 region=self.region,
                 credential_provider=provider,
                 virtual_hosted_style_request=False,
                 client_options={"allow_http": True},
             )
-            return ObjectStoreRegistry({f"s3://{self.host}": store})
+            return ObjectStoreRegistry({f"s3://{self.host}": s3_store})
 
         options: Any = {}
         if self.needs_token and token:

@@ -1,9 +1,9 @@
 # earthaccess-plugin-vds — TODO / Progress
 
 Handoff notes for any agent continuing this work. **Canonical design plan:**
-`~/github/betolink/earthaccess/docs/plans/virtual-plugin.md` (fork branch
-`virtual-plugin`) — read §3 (user-facing design) and §13 (decisions) before
-writing code. This file tracks progress + next steps only.
+`~/github/betolink/earthaccess/docs/plans/virtual-plugin.md` (upstream branch
+`earthaccess-dev/earthaccess@plugins`) — read §3 (user-facing design) and §13
+(decisions) before writing code. This file tracks progress + next steps only.
 
 Last updated: 2026-11-02 (after stores slice: local create+append works for
 both formats; see `tests/test_plugin.py`).
@@ -12,14 +12,14 @@ both formats; see `tests/test_plugin.py`).
 
 | Repo | Branch | State |
 |---|---|---|
-| `~/github/betolink/earthaccess-plugin-spec` | `vds-contract` (pushed) | Phase 1 done, **not merged/tagged yet** |
-| `~/github/betolink/earthaccess` (fork) | `virtual-plugin` (pushed) | plan + spec-branch pin committed |
-| `~/github/betolink/earthaccess-plugin-vds` | `main` (pushed) | Phase 2 slice 1 done (engine) |
+| `earthaccess-dev/earthaccess-plugin-spec` | `main` @ `v0.3.0` | contract merged and tagged |
+| `earthaccess-dev/earthaccess` | `plugins` (pushed) | v2.0 plugins work; fork `betolink/earthaccess@virtual-plugin` mirrors it |
+| `earthaccess-dev/earthaccess-plugin-vds` | `main` | Phase 2 slice 1 done (engine) |
 
 Environments:
 - Plugin venv: `cd earthaccess-plugin-vds && .venv/bin/python -m pytest -q`;
   ruff via `.venv/bin/python -m ruff check .`; mypy via `.venv/bin/python -m mypy`.
-  Contains editable `earthaccess` (fork checkout), spec `0.3.0 @ vds-contract`,
+  Contains editable `earthaccess` (fork checkout), spec `0.3.0 @ v0.3.0`,
   virtualizarr 2.8.0 / icechunk 2.3.1 / obstore 0.12.1.
 - Fork venv (`earthaccess/.venv`) has the spec installed **editable** from
   `../earthaccess-plugin-spec` — used to prove harmony/pydap/sliderule load.
@@ -118,12 +118,13 @@ covered.**
 - `DataCollection.virtual_collection_url()` is **called but not defined
   anywhere in the fork** (latent AttributeError) — must be implemented in
   Phase 3.
-- The spec repo has moved to the `earthaccess-dev` org (betolink URLs
-  redirect); retarget all pins when merging/tagging.
-- uv pip refuses one resolution with two different direct-URL pins of the same
-  dist → keep fork + plugin spec pins identical (`@vds-contract` until the
-  tag). After editing the fork's pyproject, reinstall its editable package so
-  metadata refreshes.
+- The spec repo and the v2.0 core live in `earthaccess-dev`; every pin is
+  `@v0.3.0` (spec) and `@plugins` (earthaccess). betolink URLs still redirect
+  but must not be reintroduced.
+- uv refuses one resolution with two different direct-URL pins of the same
+  dist → the `plugins` branch and every plugin must pin the **same** spec URL
+  and rev (`@v0.3.0`). After editing the fork's pyproject, reinstall its
+  editable package so metadata refreshes.
 - The plugin's `tests/` has no `__init__.py` → mypy checks test files strictly
   (annotate everything, or add `__init__.py`).
 
