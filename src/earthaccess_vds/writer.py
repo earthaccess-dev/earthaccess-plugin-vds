@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -37,16 +38,19 @@ __all__ = [
 StoreFormat = Literal["icechunk", "kerchunk"]
 
 
-def derive_vccs_from_vds(vds: Any) -> dict[str, Any]:
-    """Derive the virtual chunk containers needed to write *vds*.
+CREDENTIALS_METADATA_KEY = "earthaccess:virtual_chunk_credentials"
+"""Repository metadata key recording where to fetch credentials for S3 chunks.
 
-    Walks every ``ManifestArray`` in the dataset and collects one container per
-    unique ``scheme://host/`` prefix in its chunk references. ``s3://``
-    containers use the default NASA cloud region; ``http(s)://`` containers
-    need no credentials at write time.
-    """
+The value is non-secret and namespaced so other icechunk clients can ignore it::
 
-    import icechunk
+    {"version": 1, "containers": {"<url_prefix>": {
+        "provider": ..., "collection_concept_id": ...,
+        "credentials_endpoint": ..., "region": ...}}}
+"""
+
+
+def _chunk_prefixes(vds: Any) -> dict[str, str]:
+    """Map every ``scheme://host/`` in *vds*' chunk references to its scheme."""
 
     try:
         from virtualizarr.manifests import ManifestArray
@@ -65,7 +69,90 @@ def derive_vccs_from_vds(vds: Any) -> dict[str, Any]:
             parsed = urlparse(path)
             if parsed.scheme in ("s3", "https", "http"):
                 prefixes[f"{parsed.scheme}://{parsed.netloc}/"] = parsed.scheme
+    return prefixes
 
+
+def s3_prefixes_from_vds(vds: Any) -> set[str]:
+    """Return the ``s3://bucket/`` prefixes referenced by *vds*' chunks."""
+
+    return {p for p, scheme in _chunk_prefixes(vds).items() if scheme == "s3"}
+
+
+def credential_hints(
+    granules: Sequence[Any], vds: Any
+) -> dict[str, dict[str, Any]]:
+    """Where to fetch credentials for each S3 virtual chunk container in *vds*.
+
+    Derived from the source granules' metadata (granule, then collection) and
+    keyed by the container's exact ``url_prefix``. Nothing secret is returned:
+    only the endpoint, provider and collection identity, which are public.
+    """
+
+    from urllib.parse import urlparse
+
+    from .credentials import get_granule_credentials_endpoint_and_region
+
+    hints: dict[str, dict[str, Any]] = {}
+    for prefix in sorted(s3_prefixes_from_vds(vds)):
+        bucket = urlparse(prefix).netloc
+        granule = _granule_for_bucket(granules, bucket)
+        if granule is None:
+            continue
+        try:
+            endpoint, region = get_granule_credentials_endpoint_and_region(granule)
+        except (KeyError, ValueError):
+            continue
+        meta = granule.get("meta", {})
+        hints[prefix] = {
+            "provider": meta.get("provider-id"),
+            "collection_concept_id": meta.get("collection-concept-id"),
+            "credentials_endpoint": endpoint,
+            "region": region,
+        }
+    return hints
+
+
+def _granule_for_bucket(granules: Sequence[Any], bucket: str) -> Any:
+    """Return the first granule with an S3 data link in *bucket*."""
+
+    from urllib.parse import urlparse
+
+    for granule in granules:
+        try:
+            links = granule.data_links(access="s3")
+        except Exception:  # noqa: BLE001 - a hint must never fail a write
+            continue
+        if any(urlparse(link).netloc == bucket for link in links):
+            return granule
+    return None
+
+
+def _write_credential_hints(repo: Any, hints: dict[str, dict[str, Any]]) -> None:
+    """Merge *hints* into the repository metadata (never replaces other keys)."""
+
+    if not hints:
+        return
+    metadata = repo.metadata or {}
+    spec = metadata.get(CREDENTIALS_METADATA_KEY) or {}
+    containers = dict(spec.get("containers") or {})
+    containers.update(hints)
+    repo.update_metadata(
+        {CREDENTIALS_METADATA_KEY: {"version": 1, "containers": containers}}
+    )
+
+
+def derive_vccs_from_vds(vds: Any) -> dict[str, Any]:
+    """Derive the virtual chunk containers needed to write *vds*.
+
+    Walks every ``ManifestArray`` in the dataset and collects one container per
+    unique ``scheme://host/`` prefix in its chunk references. ``s3://``
+    containers use the default NASA cloud region; ``http(s)://`` containers
+    need no credentials at write time.
+    """
+
+    import icechunk
+
+    prefixes = _chunk_prefixes(vds)
     if not prefixes:
         msg = (
             "writing a virtual store requires a virtual dataset (load=False) "
@@ -140,6 +227,7 @@ def write_icechunk(
     prefix: str | None = None,
     repository_config: Any = None,
     virtual_chunk_containers: dict[str, Any] | None = None,
+    credential_hints: dict[str, dict[str, Any]] | None = None,
 ) -> Asset:
     """Create or append to an icechunk repository at *target*.
 
@@ -153,7 +241,8 @@ def write_icechunk(
     ``repository_config`` is only applied when the repository is created; on
     append the stored configuration wins and a warning is emitted.
     ``virtual_chunk_containers`` overrides the containers derived from the
-    dataset on both paths.
+    dataset on both paths. ``credential_hints`` is merged into the repository
+    metadata (see :data:`CREDENTIALS_METADATA_KEY`).
     """
 
     import icechunk
@@ -171,6 +260,7 @@ def write_icechunk(
             commit=commit,
             derived=derived,
             explicit=explicit,
+            credential_hints=credential_hints,
         )
 
     existed = icechunk.Repository.exists(resolved.storage)
@@ -217,6 +307,8 @@ def write_icechunk(
     vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
     if commit:
         session.commit("vds append" if append_dim else "vds create")
+    if credential_hints:
+        _write_credential_hints(repo, credential_hints)
 
     return Asset(
         href=resolved.href,
@@ -235,6 +327,7 @@ def _write_into_repository(
     commit: bool,
     derived: dict[str, Any],
     explicit: dict[str, Any],
+    credential_hints: dict[str, dict[str, Any]] | None,
 ) -> Asset:
     """Write into a repository the caller already opened (never created here)."""
 
@@ -263,6 +356,8 @@ def _write_into_repository(
     vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
     if commit:
         session.commit("vds create" if empty else "vds append")
+    if credential_hints:
+        _write_credential_hints(repo, credential_hints)
 
     return Asset(
         href=resolved.href,
