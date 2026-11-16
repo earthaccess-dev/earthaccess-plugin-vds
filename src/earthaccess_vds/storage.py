@@ -44,6 +44,9 @@ class StoreTarget:
     storage: Any = None
     """An :class:`icechunk.Storage` (only for icechunk targets)."""
 
+    repository: Any = None
+    """An already-open :class:`icechunk.Repository` (never created by us)."""
+
 
 def is_icechunk_uri(uri: str) -> bool:
     """Return ``True`` when *uri* looks like an icechunk repository.
@@ -77,6 +80,17 @@ def resolve_icechunk_target(
 
     import icechunk
     from obstore.store import LocalStore, S3Store
+
+    if isinstance(target, icechunk.Repository):
+        if href is None:
+            msg = (
+                "an icechunk.Repository target carries no readable location; "
+                "pass href=... so the returned Asset can be reopened"
+            )
+            raise ValueError(msg)
+        return StoreTarget(
+            href=href, access=_access_for(href), repository=target
+        )
 
     if isinstance(target, icechunk.Storage):
         if href is None:
@@ -145,7 +159,7 @@ def resolve_kerchunk_target(
     if isinstance(target, (S3Store, LocalStore)) or _is_icechunk_storage(target):
         msg = (
             "kerchunk stores are written through fsspec; pass the target as a "
-            "path or URI, not an obstore store or icechunk Storage"
+            "path or URI, not an obstore store, icechunk Storage or Repository"
         )
         raise TypeError(msg)
 

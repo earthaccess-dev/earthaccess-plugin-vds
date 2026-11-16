@@ -15,6 +15,7 @@ these writers only ever write one complete reference set.
 from __future__ import annotations
 
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
@@ -124,6 +125,10 @@ def write_virtual_store(
     raise ValueError(msg)
 
 
+_EMPTY_SNAPSHOT_ID = "1CECHNKREP0F1RSTCMT0"
+"""Snapshot icechunk reports for a repository with no commits yet."""
+
+
 def write_icechunk(
     vds: Any,
     target: Any,
@@ -131,23 +136,52 @@ def write_icechunk(
     append_dim: str | None = None,
     concat_dim: str | None = None,
     commit: bool = True,
+    href: str | None = None,
+    prefix: str | None = None,
+    repository_config: Any = None,
+    virtual_chunk_containers: dict[str, Any] | None = None,
 ) -> Asset:
     """Create or append to an icechunk repository at *target*.
 
-    Create-vs-append is decided by the repository's existence. On append the
-    dataset is written along ``append_dim`` (defaulting to ``concat_dim``), and
-    any virtual chunk container missing from the stored configuration is merged
-    in explicitly — a config passed to ``open_or_create`` is ignored for an
-    existing repository.
+    Create-vs-append is decided by the repository's existence (or, for a
+    caller-supplied :class:`icechunk.Repository`, by whether it already has
+    commits). On append the dataset is written along ``append_dim`` (defaulting
+    to ``concat_dim``), and any virtual chunk container missing from the stored
+    configuration is merged in explicitly — a config passed to
+    ``open_or_create`` is ignored for an existing repository.
+
+    ``repository_config`` is only applied when the repository is created; on
+    append the stored configuration wins and a warning is emitted.
+    ``virtual_chunk_containers`` overrides the containers derived from the
+    dataset on both paths.
     """
 
     import icechunk
 
-    resolved = resolve_icechunk_target(target)
-    vccs = derive_vccs_from_vds(vds)
+    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    derived = derive_vccs_from_vds(vds)
+    explicit = virtual_chunk_containers or {}
+
+    if resolved.repository is not None:
+        return _write_into_repository(
+            vds,
+            resolved,
+            append_dim=append_dim,
+            concat_dim=concat_dim,
+            commit=commit,
+            derived=derived,
+            explicit=explicit,
+        )
 
     existed = icechunk.Repository.exists(resolved.storage)
     if existed:
+        if repository_config is not None:
+            warnings.warn(
+                "repository_config= is ignored: the store already exists and "
+                "icechunk keeps the stored configuration on append.",
+                UserWarning,
+                stacklevel=2,
+            )
         append_dim = append_dim or concat_dim
         if append_dim is None:
             msg = (
@@ -159,17 +193,22 @@ def write_icechunk(
         config = icechunk.Repository.fetch_config(resolved.storage)
         if config is None:  # pragma: no cover - exists() said otherwise
             config = icechunk.RepositoryConfig.default()
-        added = _merge_vccs(config, vccs)
+        changed = _merge_vccs(config, derived)
+        changed = _set_vccs(config, explicit) or changed
     else:
-        config = icechunk.RepositoryConfig.default()
-        for prefix, store_config in vccs.items():
-            config.set_virtual_chunk_container(
-                icechunk.VirtualChunkContainer(prefix, store_config),
-            )
-        added = False
+        base = (
+            repository_config
+            if repository_config is not None
+            else icechunk.RepositoryConfig.default()
+        )
+        # merge() returns a new config, so the caller's object is never mutated
+        config = icechunk.RepositoryConfig.default().merge(base)
+        _merge_vccs(config, derived)
+        _set_vccs(config, explicit)
+        changed = False
 
     repo = icechunk.Repository.open_or_create(resolved.storage, config=config)
-    if existed and added:
+    if existed and changed:
         # The stored config wins on open; persist the merged containers so
         # future readers can authorize every host this store references.
         repo.save_config()
@@ -185,6 +224,72 @@ def write_icechunk(
         auth="none",
         format="icechunk",
     )
+
+
+def _write_into_repository(
+    vds: Any,
+    resolved: Any,
+    *,
+    append_dim: str | None,
+    concat_dim: str | None,
+    commit: bool,
+    derived: dict[str, Any],
+    explicit: dict[str, Any],
+) -> Asset:
+    """Write into a repository the caller already opened (never created here)."""
+
+
+    repo = resolved.repository
+    config = repo.config
+    changed = _merge_vccs(config, derived)
+    changed = _set_vccs(config, explicit) or changed
+    if changed:
+        # ``repo.config`` is a copy: reopen with it so save_config persists it.
+        repo = repo.reopen(config=config)
+        repo.save_config()
+
+    empty = repo.lookup_branch("main") == _EMPTY_SNAPSHOT_ID
+    if not empty:
+        append_dim = append_dim or concat_dim
+        if append_dim is None:
+            msg = (
+                f"the icechunk repository at {resolved.href!r} already has data; "
+                "pass append_dim=... (or concat_dim=... to append along the "
+                "combine dimension)"
+            )
+            raise ValueError(msg)
+
+    session = repo.writable_session("main")
+    vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+    if commit:
+        session.commit("vds create" if empty else "vds append")
+
+    return Asset(
+        href=resolved.href,
+        access=resolved.access,
+        auth="none",
+        format="icechunk",
+    )
+
+
+def _set_vccs(config: Any, vccs: dict[str, Any]) -> bool:
+    """Set explicit containers on *config* (they win); return whether it changed."""
+
+    import icechunk
+
+    if not vccs:
+        return False
+    existing = config.virtual_chunk_containers or {}
+    changed = False
+    for url_prefix, store_config in vccs.items():
+        current = existing.get(url_prefix)
+        if current is not None and str(current.store) == str(store_config):
+            continue
+        config.set_virtual_chunk_container(
+            icechunk.VirtualChunkContainer(url_prefix, store_config),
+        )
+        changed = True
+    return changed
 
 
 def write_kerchunk(
