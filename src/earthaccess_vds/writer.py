@@ -23,6 +23,7 @@ from typing import Any, Literal
 from earthaccess_plugin_spec import Asset
 
 from .idempotency import INGESTED_METADATA_KEY
+from .regions import NASA_REGION
 from .storage import (
     resolve_icechunk_target,
     resolve_kerchunk_target,
@@ -203,6 +204,7 @@ def read_icechunk_state(
     *,
     href: str | None = None,
     prefix: str | None = None,
+    region: str = NASA_REGION,
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]], Any]:
     """Read ``(key -> index, ledger, resolved target)`` from an existing store.
 
@@ -216,7 +218,9 @@ def read_icechunk_state(
     import pandas as pd
     import xarray as xr
 
-    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    resolved = resolve_icechunk_target(
+        target, href=href, prefix=prefix, region=region
+    )
     repo = resolved.repository
     if repo is None:
         if not icechunk.Repository.exists(resolved.storage):
@@ -306,6 +310,7 @@ def write_icechunk(
     credential_hints: dict[str, dict[str, Any]] | None = None,
     upserts: list[tuple[slice, Any]] | None = None,
     ingested: dict[str, dict[str, Any]] | None = None,
+    region: str = NASA_REGION,
 ) -> Asset:
     """Create or append to an icechunk repository at *target*.
 
@@ -331,7 +336,9 @@ def write_icechunk(
 
     import icechunk
 
-    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    resolved = resolve_icechunk_target(
+        target, href=href, prefix=prefix, region=region
+    )
     pieces = [piece for _slice, piece in (upserts or [])]
     derived = derive_vccs_from_many([vds, *pieces])
     explicit = virtual_chunk_containers or {}
@@ -348,6 +355,7 @@ def write_icechunk(
             credential_hints=credential_hints,
             upserts=upserts,
             ingested=ingested,
+            region=region,
         )
 
     existed = icechunk.Repository.exists(resolved.storage)
@@ -397,6 +405,7 @@ def write_icechunk(
         upserts=upserts,
         append_dim=append_dim,
         region_dim=concat_dim or append_dim,
+        region=region,
     )
     if commit:
         session.commit("vds append" if append_dim else "vds create")
@@ -425,6 +434,7 @@ def _write_into_repository(
     credential_hints: dict[str, dict[str, Any]] | None,
     upserts: list[tuple[slice, Any]] | None,
     ingested: dict[str, dict[str, Any]] | None,
+    region: str = NASA_REGION,
 ) -> Asset:
     """Write into a repository the caller already opened (never created here)."""
 
@@ -456,6 +466,7 @@ def _write_into_repository(
         upserts=upserts,
         append_dim=append_dim,
         region_dim=concat_dim or append_dim,
+        region=region,
     )
     if commit:
         session.commit("vds create" if empty else "vds append")
@@ -479,19 +490,38 @@ def _write_session(
     upserts: list[tuple[slice, Any]] | None,
     append_dim: str | None,
     region_dim: str | None,
+    region: str = NASA_REGION,
 ) -> None:
     """Region-write the upserts, then append the new dataset (one session)."""
 
-    for index_slice, piece in upserts or []:
-        if region_dim is None:  # pragma: no cover - guarded by the callers
-            msg = "upserting requires concat_dim to locate the existing keys"
-            raise ValueError(msg)
-        piece.virtualize.to_icechunk(
-            session.store,
-            region={region_dim: index_slice},
-        )
-    if vds is not None:
-        vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+    try:
+        for index_slice, piece in upserts or []:
+            if region_dim is None:  # pragma: no cover - guarded by the callers
+                msg = "upserting requires concat_dim to locate the existing keys"
+                raise ValueError(msg)
+            piece.virtualize.to_icechunk(
+                session.store,
+                region={region_dim: index_slice},
+            )
+        if vds is not None:
+            vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+    except Exception as exc:
+        hint = _region_hint(exc, region)
+        if hint is not None:
+            raise hint from exc
+        raise
+
+
+def _region_hint(exc: BaseException, region: str) -> ValueError | None:
+    """Turn a region-looking icechunk failure into an actionable error."""
+
+    message = str(exc).lower()
+    if not any(token in message for token in ("301", "permanentredirect", "region")):
+        return None
+    return ValueError(
+        "the icechunk write failed with a region-looking error; the target "
+        f"bucket may live in another region. Pass region=... (current: {region})."
+    )
 
 
 def write_ingested_only(
@@ -500,6 +530,7 @@ def write_ingested_only(
     *,
     href: str | None = None,
     prefix: str | None = None,
+    region: str = NASA_REGION,
 ) -> None:
     """Merge ledger entries without touching the data (probe-only runs)."""
 
@@ -507,7 +538,9 @@ def write_ingested_only(
         return
     import icechunk
 
-    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    resolved = resolve_icechunk_target(
+        target, href=href, prefix=prefix, region=region
+    )
     repo = resolved.repository
     if repo is None:
         if not icechunk.Repository.exists(resolved.storage):

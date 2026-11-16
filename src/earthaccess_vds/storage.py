@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from .regions import NASA_REGION
+
 __all__ = [
     "StoreTarget",
     "is_icechunk_uri",
@@ -69,6 +71,7 @@ def resolve_icechunk_target(
     *,
     href: str | None = None,
     prefix: str | None = None,
+    region: str = NASA_REGION,
 ) -> StoreTarget:
     """Resolve *target* to an icechunk :class:`StoreTarget`.
 
@@ -110,7 +113,7 @@ def resolve_icechunk_target(
             bucket = parsed.netloc
             prefix = parsed.path.lstrip("/")
             storage = icechunk.Storage.new_s3_object_store(
-                icechunk.S3Options(),
+                icechunk.S3Options(region=region),
                 bucket,
                 prefix,
                 credentials=icechunk.S3Credentials.FromEnv(),
@@ -130,7 +133,7 @@ def resolve_icechunk_target(
         raise ValueError(msg)
 
     if isinstance(target, S3Store):
-        return _from_s3_store(target, href=href, prefix=prefix)
+        return _from_s3_store(target, href=href, prefix=prefix, region=region)
 
     if isinstance(target, LocalStore):
         path = str(target.prefix)
@@ -210,6 +213,7 @@ def _from_s3_store(
     *,
     href: str | None,
     prefix: str | None,
+    region: str = NASA_REGION,
 ) -> StoreTarget:
     """Bridge a configured obstore ``S3Store`` to an icechunk Storage.
 
@@ -228,7 +232,7 @@ def _from_s3_store(
     skip_signature = str(config.get("skip_signature", "")).lower() == "true"
 
     options = icechunk.S3Options(
-        region=config.get("region"),
+        region=config.get("region") or region,
         endpoint_url=config.get("endpoint"),
         allow_http=allow_http,
         anonymous=skip_signature,

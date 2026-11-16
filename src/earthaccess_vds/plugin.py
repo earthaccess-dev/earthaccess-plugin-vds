@@ -74,6 +74,13 @@ class VDSPlugin(PluginBase):
         Ignored with a warning when the store already exists: icechunk keeps the
         stored configuration on append."""
 
+        region: str = "us-west-2"
+        """Region of the target S3 bucket (and of direct NASA S3 access).
+
+        Defaults to ``us-west-2`` because NASA Earthdata S3 is only reachable
+        from there. Pass your bucket's region for a custom S3 target; the
+        ``icechunk.Storage`` / obstore ``S3Store`` forms take precedence."""
+
         dedupe: Literal["upsert", "skip", "off"] = "upsert"
         """Icechunk only: how a batch interacts with keys already in the store.
 
@@ -400,7 +407,11 @@ def _run(
         from .writer import read_icechunk_state
 
         index, ledger, resolved = read_icechunk_state(
-            options.store, options.concat_dim, href=options.href, prefix=options.prefix
+            options.store,
+            options.concat_dim,
+            href=options.href,
+            prefix=options.prefix,
+            region=options.region,
         )
         plan = plan_batch(
             list(granules),
@@ -436,6 +447,7 @@ def _run(
                     ledger_entries(plan, include_unchanged=True),
                     href=options.href,
                     prefix=options.prefix,
+                    region=options.region,
                 )
             return [
                 Asset(
@@ -558,6 +570,7 @@ def _write_icechunk_sequence(
         "credential_hints": hints,
         "upserts": upserts,
         "ingested": ingested,
+        "region": options.region,
     }
 
     asset: Asset | None = None
