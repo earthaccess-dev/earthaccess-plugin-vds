@@ -42,6 +42,10 @@ class VDSPlugin(PluginBase):
         prefix: str | None = None
         """Repository prefix when ``store`` is an obstore ``S3Store``."""
 
+        href: str | None = None
+        """Canonical location for the Asset when ``store`` is an icechunk
+        ``Storage`` or ``Repository`` (neither carries a readable path)."""
+
         format: Literal["icechunk", "kerchunk"] = "icechunk"
         source: Any = None
         """An existing store (href/Asset) to merge into ``store``."""
@@ -62,6 +66,20 @@ class VDSPlugin(PluginBase):
 
         commit: bool = True
         """Icechunk only: commit the write to ``main``."""
+
+        repository_config: Any = None
+        """Icechunk only: ``icechunk.RepositoryConfig`` used when the repository
+        is created (manifest splitting, inline threshold, compression, ...).
+
+        Ignored with a warning when the store already exists: icechunk keeps the
+        stored configuration on append."""
+
+        virtual_chunk_containers: dict[str, Any] | None = None
+        """Icechunk only: extra ``VirtualChunkContainer`` store configs, keyed by
+        ``url_prefix`` (``icechunk.s3_store(...)`` / ``icechunk.http_store(...)``).
+
+        Merged with the containers derived from the dataset's chunk references;
+        entries here win, so a private bucket or custom endpoint can be used."""
 
         # --- virtualize ---
         access: Literal["direct", "indirect"] = "indirect"
@@ -200,6 +218,22 @@ def _has_data_links(granule: Any) -> bool | None:
 # ---------------------------------------------------------------------------
 
 
+def _icechunk_target_kind(target: Any) -> str | None:
+    """Return ``"repository"``/``"storage"`` when *target* is an icechunk object."""
+
+    if target is None:
+        return None
+    try:
+        import icechunk
+    except ImportError:  # pragma: no cover - hard dependency
+        return None
+    if isinstance(target, icechunk.Repository):
+        return "repository"
+    if isinstance(target, icechunk.Storage):
+        return "storage"
+    return None
+
+
 def _validate(granules: list[Any], options: VDSPlugin.Options) -> str:
     """Validate the request eagerly; return the job's output kind."""
 
@@ -211,6 +245,31 @@ def _validate(granules: list[Any], options: VDSPlugin.Options) -> str:
         raise TypeError(msg)
     if options.format not in _FORMATS:
         msg = f"Unsupported format {options.format!r}: use 'icechunk' or 'kerchunk'"
+        raise ValueError(msg)
+    if options.format != "icechunk" and (
+        options.repository_config is not None
+        or options.virtual_chunk_containers is not None
+    ):
+        msg = (
+            "repository_config= and virtual_chunk_containers= only apply to "
+            "format='icechunk'"
+        )
+        raise ValueError(msg)
+    kind = _icechunk_target_kind(options.store)
+    if kind is not None and options.format != "icechunk":
+        msg = f"store= an icechunk {kind} requires format='icechunk'"
+        raise ValueError(msg)
+    if kind is not None and options.href is None:
+        msg = (
+            f"store= an icechunk {kind} carries no readable location; pass "
+            "href=... so the returned Asset can be reopened"
+        )
+        raise ValueError(msg)
+    if kind == "repository" and options.repository_config is not None:
+        msg = (
+            "repository_config= cannot be combined with store= an "
+            "icechunk.Repository; configure the repository when you create it"
+        )
         raise ValueError(msg)
     if options.load and options.store is not None:
         msg = (
@@ -346,24 +405,22 @@ def _write_icechunk_sequence(
     from .engine import open_refs_store
     from .writer import write_icechunk
 
+    write_kwargs: dict[str, Any] = {
+        "append_dim": options.append_dim,
+        "concat_dim": options.concat_dim,
+        "commit": options.commit,
+        "href": options.href,
+        "prefix": options.prefix,
+        "repository_config": options.repository_config,
+        "virtual_chunk_containers": options.virtual_chunk_containers,
+    }
+
     asset: Asset | None = None
     if options.source is not None:
         source_vds = open_refs_store(options.source, access=options.access)
-        asset = write_icechunk(
-            source_vds,
-            options.store,
-            append_dim=options.append_dim,
-            concat_dim=options.concat_dim,
-            commit=options.commit,
-        )
+        asset = write_icechunk(source_vds, options.store, **write_kwargs)
     if delta is not None:
-        asset = write_icechunk(
-            delta,
-            options.store,
-            append_dim=options.append_dim,
-            concat_dim=options.concat_dim,
-            commit=options.commit,
-        )
+        asset = write_icechunk(delta, options.store, **write_kwargs)
     if asset is None:  # pragma: no cover - validation requires source or granules
         msg = "nothing to write"
         raise ValueError(msg)
