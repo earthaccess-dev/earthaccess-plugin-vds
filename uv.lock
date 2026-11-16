@@ -848,6 +848,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/3a/4fc99e788bcfa1b3b3f21abf57da45898d807d007e7f6fd1c7300904eb70/dask-2026.8.0-py3-none-any.whl", hash = "sha256:ccc0c83a189b0398602435189771d28dad7b5773b6089bb8dce14ae732dd782c", size = 1492182, upload-time = "2026-08-24T19:21:23.997Z" },
 ]
 
+[package.optional-dependencies]
+distributed = [
+    { name = "distributed" },
+]
+
 [[package]]
 name = "dask-labextension"
 version = "7.0.0"
@@ -963,7 +968,7 @@ name = "earthaccess-plugin-vds"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "dask" },
+    { name = "dask", extra = ["distributed"] },
     { name = "earthaccess" },
     { name = "earthaccess-plugin-spec" },
     { name = "h5py" },
@@ -976,7 +981,6 @@ dependencies = [
 [package.optional-dependencies]
 distributed = [
     { name = "dask-labextension" },
-    { name = "distributed" },
 ]
 kerchunk = [
     { name = "fastparquet" },
@@ -993,9 +997,8 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dask" },
+    { name = "dask", extras = ["distributed"] },
     { name = "dask-labextension", marker = "extra == 'distributed'", specifier = ">=7.0" },
-    { name = "distributed", marker = "extra == 'distributed'" },
     { name = "earthaccess", git = "https://github.com/earthaccess-dev/earthaccess.git?rev=plugins" },
     { name = "earthaccess-plugin-spec", git = "https://github.com/earthaccess-dev/earthaccess-plugin-spec.git?rev=v0.3.0" },
     { name = "fastparquet", marker = "extra == 'kerchunk'", specifier = ">=2023.4.0" },
