@@ -133,14 +133,29 @@ def plan_batch(
     """
 
     plan = BatchPlan()
+    known_store = bool(index or ledger)
+    seen: set[str] = set()
     for granule in granules:
         k = granule_key(granule, key)
         fingerprint = granule_fingerprint(granule)
         if k is None:
             plan.unkeyed.append(granule)
             continue
+        if known_store and k in seen:
+            msg = (
+                f"the batch has more than one granule for key {k!r}; "
+                "dedupe needs one granule per key. Pass key=<coordinate> to "
+                "identify a slot, or dedupe='off' to append them all."
+            )
+            raise ValueError(msg)
+        seen.add(k)
         if k not in index:
-            plan.new.append((granule, k, fingerprint))
+            if k in ledger:
+                # the ledger knows this key but the store index is unreadable:
+                # skip rather than append a duplicate
+                plan.unchanged.append((granule, k, fingerprint))
+            else:
+                plan.new.append((granule, k, fingerprint))
             continue
         if dedupe == "skip" or same_fingerprint(ledger.get(k), fingerprint):
             plan.unchanged.append((granule, k, fingerprint))

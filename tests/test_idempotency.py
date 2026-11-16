@@ -128,21 +128,25 @@ def test_fingerprint_prefers_revision_then_href() -> None:
 
 
 def test_plan_batch_classifies() -> None:
+    time_3 = "2013-01-03T00:00:00"
     plan = plan_batch(
         [
-            _granule(),                                    # unchanged
-            _granule(revision="2", href=HREF_V2),          # reprocessed
-            _granule(time=TIME_2, concept_id="G2"),        # new
-            _granule(time="", href=""),                    # unkeyed
+            _granule(),                                            # unchanged
+            _granule(time=TIME_2, revision="2", href=HREF_V2),     # reprocessed
+            _granule(time=time_3, concept_id="G3"),                # new
+            _granule(time="", href=""),                            # unkeyed
         ],
         key="time",
-        index={TIME: 0},
-        ledger={TIME: granule_fingerprint(_granule())},
+        index={TIME: 0, TIME_2: 1},
+        ledger={
+            TIME: granule_fingerprint(_granule()),
+            TIME_2: granule_fingerprint(_granule(time=TIME_2)),
+        },
     )
 
     assert len(plan.unchanged) == 1
     assert len(plan.reprocessed) == 1
-    assert plan.reprocessed[0][3] == 0
+    assert plan.reprocessed[0][3] == 1
     assert len(plan.new) == 1
     assert len(plan.unkeyed) == 1
     assert plan.summary() == {
@@ -296,3 +300,29 @@ def test_read_state_of_a_missing_store_is_empty(tmp_path: Any) -> None:
 
     assert index == {} and ledger == {}
     assert resolved.access == "file"
+
+
+def test_duplicate_keys_are_rejected_once_the_store_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    store = str(tmp_path / "sst.icechunk")
+    first = [_granule(concept_id="G1"), _granule(concept_id="G2")]
+    job, status = _request(monkeypatch, first, store=store, concat_dim="time")
+    assert status is JobStatus.SUCCEEDED, job.info()
+
+    job, status = _request(monkeypatch, first, store=store, concat_dim="time")
+
+    assert status is JobStatus.FAILED
+    assert "more than one granule" in job.info()["error"]
+
+
+def test_ledger_key_without_an_index_is_skipped() -> None:
+    plan = plan_batch(
+        [_granule(revision="2", href=HREF_V2)],
+        key="time",
+        index={},  # the coordinate could not be read
+        ledger={TIME: granule_fingerprint(_granule())},
+    )
+
+    assert len(plan.unchanged) == 1
+    assert plan.writes == 0
