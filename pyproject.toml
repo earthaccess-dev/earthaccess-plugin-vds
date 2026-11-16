@@ -30,6 +30,9 @@ vds = "earthaccess_vds:VDSPlugin"
 [project.optional-dependencies]
 kerchunk = ["kerchunk>=0.2.9", "pandas", "fastparquet>=2023.4.0", "fsspec", "s3fs"]
 distributed = ["distributed", "dask-labextension>=7.0"]
+# Notebook environment for the vds tutorials: Coiled clusters for the S3 walkthrough
+# and the JupyterLab theme used in the recorded sessions.
+notebooks = ["coiled>=1.135.6", "jldracula>=0.2.0"]
 test = ["pytest >=8.0", "mypy >=1.11", "ruff >=0.6"]
 
 [project.urls]
