@@ -21,7 +21,9 @@ dependencies = [
   "obstore>=0.12",
   "icechunk>=2.3",
   "xarray",
-  "dask",
+  # client= runs the per-granule opens on a Dask cluster; Coiled/remote
+  # workers also need `distributed` in their software environment.
+  "dask[distributed]",
 ]
 
 [project.entry-points."earthaccess.plugins"]
@@ -29,7 +31,7 @@ vds = "earthaccess_vds:VDSPlugin"
 
 [project.optional-dependencies]
 kerchunk = ["kerchunk>=0.2.9", "pandas", "fastparquet>=2023.4.0", "fsspec", "s3fs"]
-distributed = ["distributed", "dask-labextension>=7.0"]
+distributed = ["dask-labextension>=7.0"]  # `distributed` is a core dependency
 test = ["pytest >=8.0", "mypy >=1.11", "ruff >=0.6"]
 
 [project.urls]
