@@ -89,13 +89,17 @@ same request also works on a Dask cluster whose workers carry the secrets.
 
 | Option | Meaning |
 |---|---|
-| `store` | Target store: local path, `s3://` URI, obstore store, or Storage. |
+| `store` | Target store: local path, `s3://` URI, obstore store, `icechunk.Storage`, or `icechunk.Repository`. |
+| `href` | Canonical location for the Asset when `store` is a `Storage`/`Repository` (they carry no readable path). |
+| `prefix` | Repository prefix when `store` is an obstore `S3Store`. |
 | `format` | `"icechunk"` (default) or `"kerchunk"`. |
 | `source` | Existing store to merge into `store`. |
 | `assets` | File assets/URLs to virtualize instead of search results. |
 | `append_dim` | Append dimension; defaults to `concat_dim` when the store exists. |
 | `replace` | Kerchunk only: rewrite references in place (stable href). |
 | `commit` | Icechunk only: commit the write (default `True`). |
+| `repository_config` | Icechunk only: `icechunk.RepositoryConfig` applied when the repository is created (manifest splitting, inline threshold, ...). Ignored on append. |
+| `virtual_chunk_containers` | Icechunk only: extra `VirtualChunkContainer`s keyed by `url_prefix`, merged over the derived ones (entries win). |
 | `access` | `"indirect"` (HTTPS, default) or `"direct"` (S3). |
 | `parser` | VirtualiZarr parser name; `"DMRPPParser"` default with automatic `"HDFParser"` fallback. |
 | `group`, `concat_dim`, `combine`, `preprocess`, `drop_variables`, `loadable_variables` | VirtualiZarr / xarray combine controls. |
