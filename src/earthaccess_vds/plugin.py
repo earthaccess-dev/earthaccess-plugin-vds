@@ -87,6 +87,11 @@ class VDSPlugin(PluginBase):
         Only the time coordinate can be derived from CMR metadata; any other
         value disables dedupe for the batch."""
 
+        verify: Literal["metadata", "etag"] = "metadata"
+        """``"etag"`` also probes each granule's origin ETag (one HTTP HEAD per
+        granule, opt-in). Catches a file replaced in place without a CMR
+        revision bump; probe failures are recorded as ``unverified``."""
+
         on_error: Literal["raise", "skip"] = "raise"
         """``"skip"`` records a failed granule and ingests the rest (the job
         ends ``PARTIAL``); the default fails the whole batch."""
@@ -263,6 +268,9 @@ def _validate(granules: list[Any], options: VDSPlugin.Options) -> str:
     if options.dedupe not in ("upsert", "skip", "off"):
         msg = f"Unsupported dedupe={options.dedupe!r}: use 'upsert', 'skip' or 'off'"
         raise ValueError(msg)
+    if options.verify not in ("metadata", "etag"):
+        msg = f"Unsupported verify={options.verify!r}: use 'metadata' or 'etag'"
+        raise ValueError(msg)
     if options.on_error not in ("raise", "skip"):
         msg = f"Unsupported on_error={options.on_error!r}: use 'raise' or 'skip'"
         raise ValueError(msg)
@@ -401,8 +409,34 @@ def _run(
             ledger=ledger,
             dedupe=options.dedupe,
         )
-        state.set_summary(plan.summary())
+        unverified = 0
+        if options.verify == "etag":
+            from .idempotency import apply_etags
+            from .probes import probe_etags
+
+            targets: dict[str, Any] = {}
+            for granule, key, _fingerprint in [*plan.new, *plan.unchanged]:
+                targets[key] = granule
+            for granule, key, _fingerprint, _position in plan.reprocessed:
+                targets[key] = granule
+            etags = probe_etags(targets, auth=auth)
+            unverified = apply_etags(plan, etags, index=index, ledger=ledger)
+
+        summary = plan.summary()
+        if unverified:
+            summary["unverified"] = unverified
+        state.set_summary(summary)
+
         if plan.writes == 0 and not plan.unkeyed:
+            if options.verify == "etag":
+                from .writer import write_ingested_only
+
+                write_ingested_only(
+                    options.store,
+                    ledger_entries(plan, include_unchanged=True),
+                    href=options.href,
+                    prefix=options.prefix,
+                )
             return [
                 Asset(
                     href=resolved.href,
@@ -420,7 +454,9 @@ def _run(
             )
             for run in runs
         ]
-        plan_entries = ledger_entries(plan)
+        plan_entries = ledger_entries(
+            plan, include_unchanged=options.verify == "etag"
+        )
     else:
         plan_entries = {}
 

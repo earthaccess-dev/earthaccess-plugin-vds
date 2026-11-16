@@ -326,3 +326,152 @@ def test_ledger_key_without_an_index_is_skipped() -> None:
 
     assert len(plan.unchanged) == 1
     assert plan.writes == 0
+
+
+def _granule_with_production(production: str | None) -> DataGranule:
+    granule = _granule()
+    if production is not None:
+        granule["umm"]["DataGranule"] = {"ProductionDateTime": production}
+    return granule
+
+
+def test_production_time_change_is_reprocessed() -> None:
+    first = granule_fingerprint(_granule_with_production("2023-01-01T00:00:00Z"))
+    second = granule_fingerprint(_granule_with_production("2024-06-01T00:00:00Z"))
+
+    assert not same_fingerprint(first, second)
+    assert same_fingerprint(first, first)
+
+
+def test_production_time_is_used_without_a_revision() -> None:
+    first = granule_fingerprint(_granule_with_production("2023-01-01T00:00:00Z"))
+    second = granule_fingerprint(_granule_with_production("2024-06-01T00:00:00Z"))
+    first["revision"] = second["revision"] = None
+
+    assert not same_fingerprint(first, second)
+
+
+def test_apply_etags_promotes_a_replaced_file() -> None:
+    from earthaccess_vds.idempotency import apply_etags
+
+    fingerprint = granule_fingerprint(_granule())
+    plan = plan_batch(
+        [_granule()],
+        key="time",
+        index={TIME: 0},
+        ledger={TIME: {**fingerprint, "etag": '"old"'}},
+    )
+
+    unverified = apply_etags(
+        plan,
+        {TIME: '"new"'},
+        index={TIME: 0},
+        ledger={TIME: {**fingerprint, "etag": '"old"'}},
+    )
+
+    assert unverified == 0
+    assert plan.writes == 1
+    assert plan.reprocessed[0][3] == 0
+    assert plan.reprocessed[0][2]["etag"] == '"new"'
+
+
+def test_apply_etags_records_a_baseline_without_rewriting() -> None:
+    from earthaccess_vds.idempotency import apply_etags
+
+    plan = plan_batch(
+        [_granule()],
+        key="time",
+        index={TIME: 0},
+        ledger={TIME: granule_fingerprint(_granule())},
+    )
+
+    unverified = apply_etags(
+        plan, {TIME: '"first"'}, index={TIME: 0}, ledger={}
+    )
+
+    assert unverified == 0
+    assert plan.writes == 0
+    assert plan.unchanged[0][2]["etag"] == '"first"'
+
+
+def test_apply_etags_counts_failed_probes_as_unverified() -> None:
+    from earthaccess_vds.idempotency import apply_etags
+
+    plan = plan_batch(
+        [_granule()],
+        key="time",
+        index={TIME: 0},
+        ledger={TIME: granule_fingerprint(_granule())},
+    )
+
+    assert apply_etags(plan, {TIME: None}, index={TIME: 0}, ledger={}) == 1
+    assert plan.writes == 0
+
+
+def test_verify_etag_detects_an_in_place_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    store = str(tmp_path / "sst.icechunk")
+    current = {"etag": '"v1"'}
+
+    def _probe(targets: dict[str, Any], **_: Any) -> dict[str, Any]:
+        return {key: current["etag"] for key in targets}
+
+    monkeypatch.setattr("earthaccess_vds.probes.probe_etags", _probe)
+
+    job, status = _request(
+        monkeypatch, [_granule()], store=store, concat_dim="time", verify="etag"
+    )
+    assert status is JobStatus.SUCCEEDED, job.info()
+    assert _ledger(store)[TIME]["etag"] == '"v1"'
+
+    # unchanged ETag -> skipped, no rewrite
+    job, status = _request(
+        monkeypatch, [_granule()], store=store, concat_dim="time", verify="etag"
+    )
+    assert status is JobStatus.SUCCEEDED, job.info()
+    assert job.info()["summary"]["skipped"] == 1
+    assert len(_times(store)) == 1
+
+    # replaced file (new ETag), same CMR revision -> in-place upsert
+    current["etag"] = '"v2"'
+    job, status = _request(
+        monkeypatch, [_granule()], store=store, concat_dim="time", verify="etag"
+    )
+    assert status is JobStatus.SUCCEEDED, job.info()
+    assert job.info()["summary"]["upserted"] == 1
+    assert len(_times(store)) == 1
+    assert _ledger(store)[TIME]["etag"] == '"v2"'
+
+
+def test_verify_etag_counts_failed_probes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    store = str(tmp_path / "sst.icechunk")
+    _request(monkeypatch, [_granule()], store=store, concat_dim="time")
+    monkeypatch.setattr(
+        "earthaccess_vds.probes.probe_etags",
+        lambda targets, **_: dict.fromkeys(targets),
+    )
+
+    job, status = _request(
+        monkeypatch, [_granule()], store=store, concat_dim="time", verify="etag"
+    )
+
+    assert status is JobStatus.SUCCEEDED, job.info()
+    assert job.info()["summary"]["skipped"] == 1
+    assert job.info()["summary"]["unverified"] == 1
+
+
+def test_verify_metadata_does_not_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the default verify='metadata' must not probe")
+
+    monkeypatch.setattr("earthaccess_vds.probes.probe_etags", _boom)
+    store = str(tmp_path / "sst.icechunk")
+
+    job, status = _request(monkeypatch, [_granule()], store=store, concat_dim="time")
+
+    assert status is JobStatus.SUCCEEDED, job.info()

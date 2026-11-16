@@ -56,6 +56,8 @@ def granule_fingerprint(granule: Any) -> dict[str, Any]:
     """A cheap identity for detecting a reprocessed granule."""
 
     meta = granule.get("meta", {}) if hasattr(granule, "get") else {}
+    umm = granule.get("umm", {}) if hasattr(granule, "get") else {}
+    production = (umm.get("DataGranule") or {}).get("ProductionDateTime")
     href = None
     try:
         links = granule.data_links()
@@ -65,6 +67,7 @@ def granule_fingerprint(granule: Any) -> dict[str, Any]:
     return {
         "granule": meta.get("concept-id"),
         "revision": meta.get("revision-id"),
+        "production": production,
         "href": href,
     }
 
@@ -82,10 +85,21 @@ def same_fingerprint(
     if not recorded or not current:
         return False
     if recorded.get("revision") and current.get("revision"):
+        if (
+            recorded["revision"] != current["revision"]
+            or recorded.get("granule") != current.get("granule")
+        ):
+            return False
+        if recorded.get("production") and current.get("production"):
+            return recorded["production"] == current["production"]
+        return True
+    if recorded.get("production") and current.get("production"):
         return (
-            recorded["revision"] == current["revision"]
+            recorded["production"] == current["production"]
             and recorded.get("granule") == current.get("granule")
         )
+    if recorded.get("etag") and current.get("etag"):
+        return recorded["etag"] == current["etag"]
     return bool(recorded.get("href")) and recorded.get("href") == current.get("href")
 
 
@@ -178,12 +192,71 @@ def contiguous_runs(
     return runs
 
 
-def ledger_entries(plan: BatchPlan) -> dict[str, dict[str, Any]]:
-    """The ledger updates implied by a plan (only the keys that were written)."""
+def ledger_entries(
+    plan: BatchPlan,
+    *,
+    include_unchanged: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """The ledger updates implied by a plan.
+
+    Written keys always update the ledger; with ``include_unchanged`` the keys
+    that were probed but did not change are recorded too (so an ETag baseline
+    is kept without rewriting their references).
+    """
 
     entries: dict[str, dict[str, Any]] = {}
     for _granule, key, fingerprint in plan.new:
         entries[key] = fingerprint
     for _granule, key, fingerprint, _index in plan.reprocessed:
         entries[key] = fingerprint
+    if include_unchanged:
+        for _granule, key, fingerprint in plan.unchanged:
+            if fingerprint.get("etag"):
+                entries[key] = fingerprint
     return entries
+
+
+def apply_etags(
+    plan: BatchPlan,
+    etags: dict[str, str | None],
+    *,
+    index: dict[str, int],
+    ledger: dict[str, dict[str, Any]],
+) -> int:
+    """Fold probed ETags into *plan*; return the number of unverified items.
+
+    A key whose recorded ETag differs is promoted to ``reprocessed`` (it was
+    replaced in place, without a CMR revision bump). A key without a recorded
+    ETag keeps its references but records the baseline. A failed probe leaves
+    the item unchanged and counts as unverified.
+    """
+
+    unverified = 0
+    remaining: list[tuple[Any, str, dict[str, Any]]] = []
+    for granule, key, fingerprint in plan.unchanged:
+        probed = etags.get(key)
+        if probed is None:
+            unverified += 1
+            remaining.append((granule, key, fingerprint))
+            continue
+        updated = {**fingerprint, "etag": probed}
+        recorded = (ledger.get(key) or {}).get("etag")
+        if recorded and recorded != probed and key in index:
+            plan.reprocessed.append((granule, key, updated, index[key]))
+        else:
+            remaining.append((granule, key, updated))
+    plan.unchanged = remaining
+
+    plan.new = [
+        (granule, key, {**fingerprint, "etag": etags[key]})
+        if etags.get(key)
+        else (granule, key, fingerprint)
+        for granule, key, fingerprint in plan.new
+    ]
+    plan.reprocessed = [
+        (granule, key, {**fingerprint, "etag": etags[key]}, position)
+        if etags.get(key)
+        else (granule, key, fingerprint, position)
+        for granule, key, fingerprint, position in plan.reprocessed
+    ]
+    return unverified

@@ -102,6 +102,7 @@ same request also works on a Dask cluster whose workers carry the secrets.
 | `dedupe` | Icechunk only: `"upsert"` (default; skip unchanged, overwrite reprocessed, append new), `"skip"` (never overwrite) or `"off"`. |
 | `key` | Coordinate identifying a slot; defaults to `concat_dim`. Only the time coordinate is derivable from CMR metadata. |
 | `on_error` | `"raise"` (default) or `"skip"`: record a failed granule, ingest the rest, end the job `PARTIAL`. |
+| `verify` | `"metadata"` (default) or `"etag"`: also probe each granule's origin ETag (one HTTP HEAD per granule) to catch in-place replacement without a CMR revision bump. |
 | `virtual_chunk_containers` | Icechunk only: extra `VirtualChunkContainer`s keyed by `url_prefix`, merged over the derived ones (entries win). |
 | `access` | `"indirect"` (HTTPS, default) or `"direct"` (S3). |
 | `parser` | VirtualiZarr parser name; `"DMRPPParser"` default with automatic `"HDFParser"` fallback. |

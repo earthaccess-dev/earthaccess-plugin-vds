@@ -494,6 +494,28 @@ def _write_session(
         vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
 
 
+def write_ingested_only(
+    target: Any,
+    entries: dict[str, dict[str, Any]],
+    *,
+    href: str | None = None,
+    prefix: str | None = None,
+) -> None:
+    """Merge ledger entries without touching the data (probe-only runs)."""
+
+    if not entries:
+        return
+    import icechunk
+
+    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    repo = resolved.repository
+    if repo is None:
+        if not icechunk.Repository.exists(resolved.storage):
+            return
+        repo = icechunk.Repository.open(resolved.storage)
+    _write_ingested(repo, entries)
+
+
 def _write_ingested(repo: Any, entries: dict[str, dict[str, Any]]) -> None:
     """Merge ingested-key fingerprints into the repository metadata."""
 
