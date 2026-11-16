@@ -370,9 +370,14 @@ def _run(
     state.set_phase("combine")
 
     if options.format == "icechunk":
+        from .writer import credential_hints
+
+        hints = credential_hints(list(granules), delta) if granules else {}
         state.set_phase("write")
         return [
-            _write_icechunk_sequence(delta=delta, options=options, state=state)
+            _write_icechunk_sequence(
+                delta=delta, options=options, state=state, hints=hints
+            )
         ]
 
     target_exists = store_exists(options.store, format="kerchunk")
@@ -398,7 +403,11 @@ def _run(
 
 
 def _write_icechunk_sequence(
-    *, delta: Any, options: VDSPlugin.Options, state: Any
+    *,
+    delta: Any,
+    options: VDSPlugin.Options,
+    state: Any,
+    hints: dict[str, dict[str, Any]] | None = None,
 ) -> Asset:
     """Write source (if any) then the delta; icechunk appends natively."""
 
@@ -413,6 +422,7 @@ def _write_icechunk_sequence(
         "prefix": options.prefix,
         "repository_config": options.repository_config,
         "virtual_chunk_containers": options.virtual_chunk_containers,
+        "credential_hints": hints,
     }
 
     asset: Asset | None = None

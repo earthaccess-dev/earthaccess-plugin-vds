@@ -109,6 +109,12 @@ same request also works on a Dask cluster whose workers carry the secrets.
 
 ## Outputs
 
+Stores that reference `s3://` chunks also record *where to fetch credentials* in
+the icechunk repository metadata, under `earthaccess:virtual_chunk_credentials`
+(container `url_prefix`, provider, collection concept-id and credentials
+endpoint — never secrets). `ea.open_virtual(asset.href)` reads that hint, so a
+reader does not need to know the provider; other icechunk clients ignore it.
+
 | Request | `job.output` | `job.results()` |
 |---|---|---|
 | `store=` given | `assets` | `[Asset(href, access, auth="none", format="icechunk"\|"kerchunk")]` |
