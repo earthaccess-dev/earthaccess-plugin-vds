@@ -92,6 +92,7 @@ same request also works on a Dask cluster whose workers carry the secrets.
 | `store` | Target store: local path, `s3://` URI, obstore store, `icechunk.Storage`, or `icechunk.Repository`. |
 | `href` | Canonical location for the Asset when `store` is a `Storage`/`Repository` (they carry no readable path). |
 | `prefix` | Repository prefix when `store` is an obstore `S3Store`. |
+| `region` | Region of the target S3 bucket (default `us-west-2`, where NASA S3 lives). A preconfigured `Storage`/`S3Store` takes precedence. |
 | `format` | `"icechunk"` (default) or `"kerchunk"`. |
 | `source` | Existing store to merge into `store`. |
 | `assets` | File assets/URLs to virtualize instead of search results. |
@@ -134,6 +135,17 @@ change is the signal), and appends only genuinely new steps. `dedupe="skip"`
 never overwrites; `dedupe="off"` restores plain appends. With `on_error="skip"`
 a failed granule is recorded, the rest are ingested, and the job ends `PARTIAL`
 — see `job.info()["summary"]` and `job.info()["errors"]`.
+
+## Regions
+
+NASA Earthdata S3 buckets are only reachable from `us-west-2`, so
+`access="direct"` needs the **workers** there; HTTPS (`access="indirect"`, the
+default) works from anywhere. The icechunk write happens on the **client** and
+only needs the *target* bucket's region: `region=` (default `us-west-2`) for the
+`s3://` shorthand, or the bucket's region in a preconfigured `icechunk.Storage` /
+obstore `S3Store`. Whether a process actually runs in `us-west-2` is not
+detected (instance metadata is not available everywhere), so co-locate the
+cluster when using direct access.
 
 ## Development
 
