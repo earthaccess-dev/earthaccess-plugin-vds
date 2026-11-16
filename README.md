@@ -99,6 +99,10 @@ same request also works on a Dask cluster whose workers carry the secrets.
 | `replace` | Kerchunk only: rewrite references in place (stable href). |
 | `commit` | Icechunk only: commit the write (default `True`). |
 | `repository_config` | Icechunk only: `icechunk.RepositoryConfig` applied when the repository is created (manifest splitting, inline threshold, ...). Ignored on append. |
+| `dedupe` | Icechunk only: `"upsert"` (default; skip unchanged, overwrite reprocessed, append new), `"skip"` (never overwrite) or `"off"`. |
+| `key` | Coordinate identifying a slot; defaults to `concat_dim`. Only the time coordinate is derivable from CMR metadata. |
+| `on_error` | `"raise"` (default) or `"skip"`: record a failed granule, ingest the rest, end the job `PARTIAL`. |
+| `verify` | `"metadata"` (default) or `"etag"`: also probe each granule's origin ETag (one HTTP HEAD per granule) to catch in-place replacement without a CMR revision bump. |
 | `virtual_chunk_containers` | Icechunk only: extra `VirtualChunkContainer`s keyed by `url_prefix`, merged over the derived ones (entries win). |
 | `access` | `"indirect"` (HTTPS, default) or `"direct"` (S3). |
 | `parser` | VirtualiZarr parser name; `"DMRPPParser"` default with automatic `"HDFParser"` fallback. |
@@ -120,6 +124,16 @@ reader does not need to know the provider; other icechunk clients ignore it.
 | `store=` given | `assets` | `[Asset(href, access, auth="none", format="icechunk"\|"kerchunk")]` |
 | no store, `load=False` | `virtual` | manifest-form `xarray.Dataset` / `DataTree` |
 | no store, `load=True` | `xarray` | concrete lazily-loaded `xarray.Dataset` |
+
+## Idempotent ingestion
+
+`request()` is idempotent by default: each granule is keyed by its time step and
+the ingested keys are recorded in the repository metadata. Re-running a batch
+skips unchanged granules, overwrites a reprocessed one in place (a CMR revision
+change is the signal), and appends only genuinely new steps. `dedupe="skip"`
+never overwrites; `dedupe="off"` restores plain appends. With `on_error="skip"`
+a failed granule is recorded, the rest are ingested, and the job ends `PARTIAL`
+— see `job.info()["summary"]` and `job.info()["errors"]`.
 
 ## Development
 

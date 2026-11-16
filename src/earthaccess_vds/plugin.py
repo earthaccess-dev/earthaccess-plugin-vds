@@ -74,6 +74,28 @@ class VDSPlugin(PluginBase):
         Ignored with a warning when the store already exists: icechunk keeps the
         stored configuration on append."""
 
+        dedupe: Literal["upsert", "skip", "off"] = "upsert"
+        """Icechunk only: how a batch interacts with keys already in the store.
+
+        ``"upsert"`` (default) skips unchanged granules, overwrites reprocessed
+        ones in place, and appends new ones; ``"skip"`` never overwrites;
+        ``"off"`` appends everything (the pre-idempotency behaviour)."""
+
+        key: str | None = None
+        """Coordinate identifying a slot (defaults to ``concat_dim``).
+
+        Only the time coordinate can be derived from CMR metadata; any other
+        value disables dedupe for the batch."""
+
+        verify: Literal["metadata", "etag"] = "metadata"
+        """``"etag"`` also probes each granule's origin ETag (one HTTP HEAD per
+        granule, opt-in). Catches a file replaced in place without a CMR
+        revision bump; probe failures are recorded as ``unverified``."""
+
+        on_error: Literal["raise", "skip"] = "raise"
+        """``"skip"`` records a failed granule and ingests the rest (the job
+        ends ``PARTIAL``); the default fails the whole batch."""
+
         virtual_chunk_containers: dict[str, Any] | None = None
         """Icechunk only: extra ``VirtualChunkContainer`` store configs, keyed by
         ``url_prefix`` (``icechunk.s3_store(...)`` / ``icechunk.http_store(...)``).
@@ -243,6 +265,18 @@ def _validate(granules: list[Any], options: VDSPlugin.Options) -> str:
             f"got {type(options.client).__name__}"
         )
         raise TypeError(msg)
+    if options.dedupe not in ("upsert", "skip", "off"):
+        msg = f"Unsupported dedupe={options.dedupe!r}: use 'upsert', 'skip' or 'off'"
+        raise ValueError(msg)
+    if options.verify not in ("metadata", "etag"):
+        msg = f"Unsupported verify={options.verify!r}: use 'metadata' or 'etag'"
+        raise ValueError(msg)
+    if options.on_error not in ("raise", "skip"):
+        msg = f"Unsupported on_error={options.on_error!r}: use 'raise' or 'skip'"
+        raise ValueError(msg)
+    if options.on_error == "skip" and options.tree:
+        msg = "on_error='skip' is not supported with tree=True"
+        raise ValueError(msg)
     if options.format not in _FORMATS:
         msg = f"Unsupported format {options.format!r}: use 'icechunk' or 'kerchunk'"
         raise ValueError(msg)
@@ -336,10 +370,9 @@ def _run(
     else:
         source_granules = None
 
-    delta = None
-    if granules or source_granules:
-        delta = virtualize(
-            list(granules) + (source_granules or []),
+    def _virtualize(selected: list[Any]) -> Any:
+        return virtualize(
+            selected,
             access=options.access,
             load=options.load,
             group=options.group,
@@ -352,19 +385,98 @@ def _run(
             registry=registry,
             reference_dir=options.reference_dir,
             tree=options.tree,
+            on_error=options.on_error,
             auth=auth,
             parallel=executor,
             progress=state,
             **options.combine_kwargs,
         )
 
+    plan = None
+    upserts: list[tuple[Any, Any]] = []
+    append_granules: list[Any] = []
+    if _dedupe_applies(options, granules):
+        from .idempotency import contiguous_runs, ledger_entries, plan_batch
+        from .writer import read_icechunk_state
+
+        index, ledger, resolved = read_icechunk_state(
+            options.store, options.concat_dim, href=options.href, prefix=options.prefix
+        )
+        plan = plan_batch(
+            list(granules),
+            key=options.key or options.concat_dim,
+            index=index,
+            ledger=ledger,
+            dedupe=options.dedupe,
+        )
+        unverified = 0
+        if options.verify == "etag":
+            from .idempotency import apply_etags
+            from .probes import probe_etags
+
+            targets: dict[str, Any] = {}
+            for granule, key, _fingerprint in [*plan.new, *plan.unchanged]:
+                targets[key] = granule
+            for granule, key, _fingerprint, _position in plan.reprocessed:
+                targets[key] = granule
+            etags = probe_etags(targets, auth=auth)
+            unverified = apply_etags(plan, etags, index=index, ledger=ledger)
+
+        summary = plan.summary()
+        if unverified:
+            summary["unverified"] = unverified
+        state.set_summary(summary)
+
+        if plan.writes == 0 and not plan.unkeyed:
+            if options.verify == "etag":
+                from .writer import write_ingested_only
+
+                write_ingested_only(
+                    options.store,
+                    ledger_entries(plan, include_unchanged=True),
+                    href=options.href,
+                    prefix=options.prefix,
+                )
+            return [
+                Asset(
+                    href=resolved.href,
+                    access=resolved.access,
+                    auth="none",
+                    format="icechunk",
+                )
+            ]
+        append_granules = [g for g, _k, _f in plan.new] + list(plan.unkeyed)
+        runs = contiguous_runs(plan.reprocessed)
+        upserts = [
+            (
+                slice(run[0][3], run[-1][3] + 1),
+                _virtualize([granule for granule, _k, _f, _i in run]),
+            )
+            for run in runs
+        ]
+        plan_entries = ledger_entries(
+            plan, include_unchanged=options.verify == "etag"
+        )
+    else:
+        plan_entries = {}
+
+    delta = None
+    if plan is not None:
+        if append_granules:
+            delta = _virtualize(append_granules)
+    elif granules or source_granules:
+        delta = _virtualize(list(granules) + (source_granules or []))
+
     if options.store is None:
         return delta
 
     import xarray as xr
 
-    if not isinstance(delta, xr.Dataset):
+    if delta is not None and not isinstance(delta, xr.Dataset):
         msg = "tree=True cannot be persisted; store= needs a single Dataset"
+        raise ValueError(msg)
+    if delta is None and not upserts:
+        msg = "nothing to write"
         raise ValueError(msg)
 
     state.set_phase("combine")
@@ -372,11 +484,17 @@ def _run(
     if options.format == "icechunk":
         from .writer import credential_hints
 
-        hints = credential_hints(list(granules), delta) if granules else {}
+        hint_source = delta if delta is not None else (upserts[0][1] if upserts else None)
+        hints = credential_hints(list(granules), hint_source) if granules else {}
         state.set_phase("write")
         return [
             _write_icechunk_sequence(
-                delta=delta, options=options, state=state, hints=hints
+                delta=delta,
+                options=options,
+                state=state,
+                hints=hints,
+                upserts=upserts,
+                ingested=plan_entries,
             )
         ]
 
@@ -402,12 +520,27 @@ def _run(
     return [write_kerchunk(vds, options.store, replace=options.replace)]
 
 
+def _dedupe_applies(options: VDSPlugin.Options, granules: list[Any]) -> bool:
+    """Dedupe only makes sense for an icechunk store fed by CMR granules."""
+
+    return (
+        options.format == "icechunk"
+        and options.store is not None
+        and options.dedupe != "off"
+        and options.source is None
+        and options.assets is None
+        and bool(granules)
+    )
+
+
 def _write_icechunk_sequence(
     *,
     delta: Any,
     options: VDSPlugin.Options,
     state: Any,
     hints: dict[str, dict[str, Any]] | None = None,
+    upserts: list[tuple[Any, Any]] | None = None,
+    ingested: dict[str, dict[str, Any]] | None = None,
 ) -> Asset:
     """Write source (if any) then the delta; icechunk appends natively."""
 
@@ -423,6 +556,8 @@ def _write_icechunk_sequence(
         "repository_config": options.repository_config,
         "virtual_chunk_containers": options.virtual_chunk_containers,
         "credential_hints": hints,
+        "upserts": upserts,
+        "ingested": ingested,
     }
 
     asset: Asset | None = None
@@ -431,6 +566,9 @@ def _write_icechunk_sequence(
         asset = write_icechunk(source_vds, options.store, **write_kwargs)
     if delta is not None:
         asset = write_icechunk(delta, options.store, **write_kwargs)
+    if asset is None and upserts:
+        # only reprocessed keys: region-write them, no append
+        asset = write_icechunk(None, options.store, **write_kwargs)
     if asset is None:  # pragma: no cover - validation requires source or granules
         msg = "nothing to write"
         raise ValueError(msg)

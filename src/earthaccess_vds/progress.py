@@ -54,6 +54,10 @@ def dashboard_link() -> str | None:
     return getattr(client, "dashboard_link", None)
 
 
+_MAX_ERRORS = 100
+"""Cap on the per-granule error records kept for ``job.info()``."""
+
+
 @dataclass
 class ProgressState:
     """Thread-safe counters shared by the executor, the job, and the writer."""
@@ -63,6 +67,8 @@ class ProgressState:
     failed: int = 0
     phase: str = "pending"
     dashboard: str | None = field(default_factory=dashboard_link)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    summary: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def start(self, phase: str, total: int | None = None) -> None:
@@ -91,9 +97,29 @@ class ProgressState:
         with self._lock:
             self.opened += 1
 
-    def failed_one(self) -> None:
+    def failed_one(
+        self,
+        *,
+        granule: Any = None,
+        phase: str | None = None,
+        error: BaseException | str | None = None,
+    ) -> None:
+        """Count a failure and keep a bounded, structured record of it."""
+
         with self._lock:
             self.failed += 1
+            if error is not None and len(self.errors) < _MAX_ERRORS:
+                self.errors.append(
+                    {
+                        "granule": granule,
+                        "phase": phase or self.phase,
+                        "error": error if isinstance(error, str) else repr(error),
+                    }
+                )
+
+    def set_summary(self, summary: dict[str, Any]) -> None:
+        with self._lock:
+            self.summary = dict(summary)
 
     def percent(self) -> float:
         with self._lock:
@@ -113,6 +139,8 @@ class ProgressState:
                 "phase": self.phase,
                 "percent": self._percent_locked(),
                 "dashboard": self.dashboard,
+                "summary": dict(self.summary),
+                "errors": list(self.errors),
             }
 
 
@@ -256,6 +284,9 @@ class VirtualJob(Job):
         merged = {**info, **self._state.snapshot()}
         if status is JobStatus.SUCCEEDED:
             merged["phase"] = "done"
+            if self._state.errors:
+                # some granules failed but the batch completed (on_error="skip")
+                status = JobStatus.PARTIAL
         return status, merged
 
     def _cancel(self) -> bool:
