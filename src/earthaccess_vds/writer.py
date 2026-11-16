@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from earthaccess_plugin_spec import Asset
 
+from .idempotency import INGESTED_METADATA_KEY
 from .storage import (
     resolve_icechunk_target,
     resolve_kerchunk_target,
@@ -141,6 +142,32 @@ def _write_credential_hints(repo: Any, hints: dict[str, dict[str, Any]]) -> None
     )
 
 
+def derive_vccs_from_many(datasets: Any) -> dict[str, Any]:
+    """Derive the containers needed for several virtual datasets at once."""
+
+    import icechunk
+
+    prefixes: dict[str, str] = {}
+    for dataset in datasets:
+        if dataset is not None:
+            prefixes.update(_chunk_prefixes(dataset))
+    if not prefixes:
+        msg = (
+            "writing a virtual store requires a virtual dataset (load=False) "
+            "backed by ManifestArray variables; no virtual chunk references "
+            "were found"
+        )
+        raise ValueError(msg)
+
+    vccs: dict[str, Any] = {}
+    for prefix, scheme in prefixes.items():
+        if scheme == "s3":
+            vccs[prefix] = icechunk.s3_store(region="us-west-2")
+        else:
+            vccs[prefix] = icechunk.http_store()
+    return vccs
+
+
 def derive_vccs_from_vds(vds: Any) -> dict[str, Any]:
     """Derive the virtual chunk containers needed to write *vds*.
 
@@ -168,6 +195,55 @@ def derive_vccs_from_vds(vds: Any) -> dict[str, Any]:
         else:
             vccs[prefix] = icechunk.http_store()
     return vccs
+
+
+def read_icechunk_state(
+    target: Any,
+    concat_dim: str | None,
+    *,
+    href: str | None = None,
+    prefix: str | None = None,
+) -> tuple[dict[str, int], dict[str, dict[str, Any]], Any]:
+    """Read ``(key -> index, ledger, resolved target)`` from an existing store.
+
+    The index maps the concat-coordinate values to their position in the store,
+    so a reprocessed key can be overwritten in place. The ledger records which
+    keys were ingested (see :data:`~earthaccess_vds.idempotency.INGESTED_METADATA_KEY`).
+    A missing store returns empty structures.
+    """
+
+    import icechunk
+    import pandas as pd
+    import xarray as xr
+
+    resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
+    repo = resolved.repository
+    if repo is None:
+        if not icechunk.Repository.exists(resolved.storage):
+            return {}, {}, resolved
+        repo = icechunk.Repository.open(resolved.storage)
+    elif repo.lookup_branch("main") == _EMPTY_SNAPSHOT_ID:
+        return {}, {}, resolved
+
+    metadata = repo.metadata or {}
+    ledger = dict((metadata.get(INGESTED_METADATA_KEY) or {}).get("keys") or {})
+
+    index: dict[str, int] = {}
+    if concat_dim:
+        try:
+            dataset = xr.open_zarr(
+                repo.readonly_session("main").store,
+                consolidated=False,
+            )
+        except Exception:  # noqa: BLE001 - unreadable store falls back to append
+            return {}, ledger, resolved
+        if concat_dim in dataset.coords:
+            values = dataset[concat_dim].values
+            index = {
+                pd.Timestamp(value).isoformat(): position
+                for position, value in enumerate(values)
+            }
+    return index, ledger, resolved
 
 
 def store_exists(target: Any, *, format: StoreFormat = "icechunk") -> bool:
@@ -228,6 +304,8 @@ def write_icechunk(
     repository_config: Any = None,
     virtual_chunk_containers: dict[str, Any] | None = None,
     credential_hints: dict[str, dict[str, Any]] | None = None,
+    upserts: list[tuple[slice, Any]] | None = None,
+    ingested: dict[str, dict[str, Any]] | None = None,
 ) -> Asset:
     """Create or append to an icechunk repository at *target*.
 
@@ -241,14 +319,21 @@ def write_icechunk(
     ``repository_config`` is only applied when the repository is created; on
     append the stored configuration wins and a warning is emitted.
     ``virtual_chunk_containers`` overrides the containers derived from the
-    dataset on both paths. ``credential_hints`` is merged into the repository
-    metadata (see :data:`CREDENTIALS_METADATA_KEY`).
+    dataset on both paths. ``credential_hints`` and ``ingested`` are merged
+    into the repository metadata (see :data:`CREDENTIALS_METADATA_KEY` and
+    :data:`~earthaccess_vds.idempotency.INGESTED_METADATA_KEY`).
+
+    ``upserts`` rewrites existing time steps in place: each ``(slice, vds)``
+    pair is written to that slice of ``concat_dim`` instead of being appended,
+    so a reprocessed granule replaces its predecessor without duplicating the
+    coordinate. ``vds`` may be ``None`` when the batch only upserts.
     """
 
     import icechunk
 
     resolved = resolve_icechunk_target(target, href=href, prefix=prefix)
-    derived = derive_vccs_from_vds(vds)
+    pieces = [piece for _slice, piece in (upserts or [])]
+    derived = derive_vccs_from_many([vds, *pieces])
     explicit = virtual_chunk_containers or {}
 
     if resolved.repository is not None:
@@ -261,6 +346,8 @@ def write_icechunk(
             derived=derived,
             explicit=explicit,
             credential_hints=credential_hints,
+            upserts=upserts,
+            ingested=ingested,
         )
 
     existed = icechunk.Repository.exists(resolved.storage)
@@ -273,7 +360,7 @@ def write_icechunk(
                 stacklevel=2,
             )
         append_dim = append_dim or concat_dim
-        if append_dim is None:
+        if append_dim is None and vds is not None:
             msg = (
                 f"the icechunk store at {resolved.href!r} already exists; pass "
                 "append_dim=... (or concat_dim=... to append along the "
@@ -304,11 +391,19 @@ def write_icechunk(
         repo.save_config()
 
     session = repo.writable_session("main")
-    vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+    _write_session(
+        session,
+        vds,
+        upserts=upserts,
+        append_dim=append_dim,
+        region_dim=concat_dim or append_dim,
+    )
     if commit:
         session.commit("vds append" if append_dim else "vds create")
     if credential_hints:
         _write_credential_hints(repo, credential_hints)
+    if ingested:
+        _write_ingested(repo, ingested)
 
     return Asset(
         href=resolved.href,
@@ -328,6 +423,8 @@ def _write_into_repository(
     derived: dict[str, Any],
     explicit: dict[str, Any],
     credential_hints: dict[str, dict[str, Any]] | None,
+    upserts: list[tuple[slice, Any]] | None,
+    ingested: dict[str, dict[str, Any]] | None,
 ) -> Asset:
     """Write into a repository the caller already opened (never created here)."""
 
@@ -344,7 +441,7 @@ def _write_into_repository(
     empty = repo.lookup_branch("main") == _EMPTY_SNAPSHOT_ID
     if not empty:
         append_dim = append_dim or concat_dim
-        if append_dim is None:
+        if append_dim is None and vds is not None:
             msg = (
                 f"the icechunk repository at {resolved.href!r} already has data; "
                 "pass append_dim=... (or concat_dim=... to append along the "
@@ -353,11 +450,19 @@ def _write_into_repository(
             raise ValueError(msg)
 
     session = repo.writable_session("main")
-    vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+    _write_session(
+        session,
+        vds,
+        upserts=upserts,
+        append_dim=append_dim,
+        region_dim=concat_dim or append_dim,
+    )
     if commit:
         session.commit("vds create" if empty else "vds append")
     if credential_hints:
         _write_credential_hints(repo, credential_hints)
+    if ingested:
+        _write_ingested(repo, ingested)
 
     return Asset(
         href=resolved.href,
@@ -365,6 +470,40 @@ def _write_into_repository(
         auth="none",
         format="icechunk",
     )
+
+
+def _write_session(
+    session: Any,
+    vds: Any,
+    *,
+    upserts: list[tuple[slice, Any]] | None,
+    append_dim: str | None,
+    region_dim: str | None,
+) -> None:
+    """Region-write the upserts, then append the new dataset (one session)."""
+
+    for index_slice, piece in upserts or []:
+        if region_dim is None:  # pragma: no cover - guarded by the callers
+            msg = "upserting requires concat_dim to locate the existing keys"
+            raise ValueError(msg)
+        piece.virtualize.to_icechunk(
+            session.store,
+            region={region_dim: index_slice},
+        )
+    if vds is not None:
+        vds.virtualize.to_icechunk(session.store, append_dim=append_dim)
+
+
+def _write_ingested(repo: Any, entries: dict[str, dict[str, Any]]) -> None:
+    """Merge ingested-key fingerprints into the repository metadata."""
+
+    if not entries:
+        return
+    metadata = repo.metadata or {}
+    spec = metadata.get(INGESTED_METADATA_KEY) or {}
+    keys = dict(spec.get("keys") or {})
+    keys.update(entries)
+    repo.update_metadata({INGESTED_METADATA_KEY: {"version": 1, "keys": keys}})
 
 
 def _set_vccs(config: Any, vccs: dict[str, Any]) -> bool:

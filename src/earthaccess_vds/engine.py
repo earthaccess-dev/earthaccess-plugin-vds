@@ -14,7 +14,7 @@ from __future__ import annotations
 import tempfile
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from earthaccess_vds.credentials import build_obstore_registry
 from earthaccess_vds.parser import get_urls_for_parser, resolve_parser
@@ -64,6 +64,7 @@ def virtualize(  # noqa: PLR0913, C901
     parser: ParserType = "DMRPPParser",
     reference_dir: str | None = None,
     tree: bool = False,
+    on_error: str = "raise",
     auth: AuthHandle | None = None,
     progress: Any = None,
     registry: Any = None,
@@ -146,34 +147,76 @@ def virtualize(  # noqa: PLR0913, C901
             **xr_combine_kwargs,
         )
 
-    # Attempt to open with the requested parser; fall back to HDFParser if
-    # DMR++ sidecars are not present.
+    def _attempt() -> xr.Dataset | xr.DataTree:
+        # Attempt to open with the requested parser; fall back to HDFParser if
+        # DMR++ sidecars are not present.
+        try:
+            opened = _open_once(resolved_parser, registry)
+            if progress is not None and (tree or len(granules) == 1):
+                # A single open does not go through the executor.
+                progress.opened_one()
+        except FileNotFoundError:
+            if type(resolved_parser).__name__ != "DMRPPParser":
+                raise
+            warnings.warn(
+                "DMR++ sidecar files were not found for one or more granules. "
+                "Falling back to HDFParser. "
+                "Set parser='HDFParser' to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+            fallback = resolve_parser(
+                "HDFParser",
+                group=group if group != "/" else None,
+            )
+            fallback_registry = (
+                build_obstore_registry(granules, access=access, auth=auth)
+                if own_registry
+                else registry
+            )
+            if progress is not None:
+                progress.start("virtualize", total=len(granules))
+            opened = _open_virtual_dispatch(
+                granules=granules,
+                parser=fallback,
+                registry=fallback_registry,
+                access=access,
+                concat_dim=concat_dim,
+                combine=combine,
+                join=join,
+                preprocess=preprocess,
+                loadable_variables=loadable_variables,
+                drop_variables=drop_variables,
+                parallel=parallel,
+                data_vars=data_vars,
+                coords=coords,
+                compat=compat,
+                combine_attrs=combine_attrs,
+                tree=tree,
+                **xr_combine_kwargs,
+            )
+            if progress is not None and (tree or len(granules) == 1):
+                progress.opened_one()
+        return opened
+
     try:
-        vds = _open_once(resolved_parser, registry)
-        if progress is not None and (tree or len(granules) == 1):
-            # A single open does not go through the executor.
-            progress.opened_one()
-    except FileNotFoundError:
-        if type(resolved_parser).__name__ != "DMRPPParser":
+        vds = _attempt()
+    except Exception as exc:
+        if on_error != "skip" or tree:
             raise
-        warnings.warn(
-            "DMR++ sidecar files were not found for one or more granules. "
-            "Falling back to HDFParser. "
-            "Set parser='HDFParser' to silence this warning.",
-            UserWarning,
-            stacklevel=2,
+        vds = _open_lenient(
+            granules,
+            parser=resolved_parser,
+            registry=registry,
+            access=access,
+            concat_dim=concat_dim,
+            combine=combine,
+            preprocess=preprocess,
+            loadable_variables=loadable_variables,
+            drop_variables=drop_variables,
+            progress=progress,
+            original=exc,
         )
-        resolved_parser = resolve_parser(
-            "HDFParser",
-            group=group if group != "/" else None,
-        )
-        if own_registry:
-            registry = build_obstore_registry(granules, access=access, auth=auth)
-        if progress is not None:
-            progress.start("virtualize", total=len(granules))
-        vds = _open_once(resolved_parser, registry)
-        if progress is not None and (tree or len(granules) == 1):
-            progress.opened_one()
 
     if not load:
         return vds
@@ -435,6 +478,78 @@ def open_refs_store(
         msg = f"cannot reopen a {declared!r} store as a virtual dataset"
         raise ValueError(msg)
     return _open_kerchunk_refs(href, access=access)
+
+
+def _open_lenient(
+    granules: Sequence[Any],
+    *,
+    parser: Any,
+    registry: Any,
+    access: AccessType,
+    concat_dim: str | None,
+    combine: CombineType,
+    preprocess: Callable | None,
+    loadable_variables: list[str] | None,
+    drop_variables: list[str] | None,
+    progress: Any,
+    original: BaseException,
+) -> xr.Dataset:
+    """Open granules one by one, skipping (and recording) the failures.
+
+    Used for ``on_error="skip"``: the batch-level open aborts on the first bad
+    granule, so we fall back to per-granule opens and combine the survivors.
+    """
+
+    import xarray as xr
+
+    urls = get_urls_for_parser(granules, parser, access=access)
+    pieces: list[xr.Dataset] = []
+    errors: list[dict[str, Any]] = []
+    for granule, url in zip(granules, urls, strict=False):
+        try:
+            pieces.append(
+                _open_virtual_dataset_single(
+                    url,
+                    parser=parser,
+                    registry=registry,
+                    preprocess=preprocess,
+                    drop_variables=drop_variables,
+                    loadable_variables=loadable_variables,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            errors.append(
+                {
+                    "granule": _granule_id(granule),
+                    "phase": "open",
+                    "error": repr(exc),
+                }
+            )
+        else:
+            if progress is not None:
+                progress.opened_one()
+
+    if progress is not None:
+        for error in errors:
+            progress.failed_one(**error)
+
+    if not pieces:
+        raise original
+
+    if combine == "nested":
+        return combine_virtual(pieces, concat_dim=concat_dim)
+    return cast("xr.Dataset", xr.combine_by_coords(pieces))
+
+
+def _granule_id(granule: Any) -> Any:
+    """Best-effort granule identifier for error reports."""
+
+    try:
+        return granule["meta"].get("concept-id") or granule.get("meta", {}).get(
+            "concept-id"
+        )
+    except (TypeError, KeyError):
+        return None
 
 
 def combine_virtual(
